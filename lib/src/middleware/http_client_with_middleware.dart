@@ -38,19 +38,25 @@ class HttpClientWithMiddleware extends http.BaseClient {
   Duration? requestTimeout;
 
   // final IOClient _client = IOClient();
-  static final Client _client = Client();
+  Client client;
 
-  HttpClientWithMiddleware._internal(
-      {this.middlewares = const [],
-      this.requestTimeout = const Duration(seconds: 10)});
+  HttpClientWithMiddleware._internal({
+    Client? client,
+    List<MiddlewareContract>? middlewares,
+    Duration? requestTimeout,
+  })  : client = client ?? http.Client(),
+        middlewares = middlewares ?? [],
+        requestTimeout = requestTimeout ?? const Duration(seconds: 10);
 
   factory HttpClientWithMiddleware.build({
+    Client? client,
     List<MiddlewareContract>? middlewares,
     Duration? requestTimeout,
   }) {
     //Remove any value that is null.
     // middlewares?.removeWhere((middleware) => middleware == null);
     return HttpClientWithMiddleware._internal(
+      client: client,
       middlewares: middlewares,
       requestTimeout: requestTimeout,
     );
@@ -101,26 +107,53 @@ class HttpClientWithMiddleware extends http.BaseClient {
   }
 
   @override
-  Future<StreamedResponse> send(BaseRequest request) => _client.send(request);
+  Future<StreamedResponse> send(BaseRequest request) async {
+
+    if (request is http.MultipartRequest) {
+      var response = await _sendUnstreamed(request.method, request.url, request.headers, request);
+
+      // Convert response body to a stream
+      var stream = Stream.fromIterable([response.bodyBytes]);
+
+      // Create a new StreamedResponse
+      return http.StreamedResponse(
+        http.ByteStream(stream), // Stream of bytes
+        response.statusCode, // Preserve status code
+        request: response.request, // Preserve request (if available)
+        headers: response.headers, // Preserve headers
+        contentLength: response.contentLength, // Preserve content length
+        reasonPhrase: response.reasonPhrase, // Preserve reason phrase
+      );
+
+    } else {
+      return client.send(request);
+    }
+  }
 
   Future<Response> _sendUnstreamed(
       String method, url, Map<String, String>? headers,
       [dynamic body, Encoding? encoding]) async {
     if (url is String) url = Uri.parse(url);
-    var request = Request(method, url);
 
-    if (headers != null) request.headers.addAll(headers);
-    if (encoding != null) request.encoding = encoding;
-    if (body != null) {
-      if (body is String) {
-        request.body = body;
-      } else if (body is List) {
-        request.bodyBytes = body.cast<int>();
-      } else if (body is Map) {
-        request.bodyFields = body.cast<String, String>();
-      } else {
-        throw ArgumentError('Invalid request body "$body".');
+    http.BaseRequest request = Request(method, url);
+    if (body != null && !(body is http.MultipartRequest)) {
+      request as http.Request;  // just to avoid compilation errors
+
+      if (headers != null) request.headers.addAll(headers);
+      if (encoding != null) request.encoding = encoding;
+      if (body != null) {
+        if (body is String) {
+          request.body = body;
+        } else if (body is List) {
+          request.bodyBytes = body.cast<int>();
+        } else if (body is Map) {
+          request.bodyFields = body.cast<String, String>();
+        } else {
+          throw ArgumentError('Invalid request body "$body".');
+        }
       }
+    } else if (body != null && body is http.MultipartRequest) {
+      request = body;
     }
 
     //Send interception
@@ -137,8 +170,8 @@ class HttpClientWithMiddleware extends http.BaseClient {
     );
 
     var stream = requestTimeout == null
-        ? await send(request)
-        : await send(request).timeout(requestTimeout!);
+        ? await client.send(request)
+        : await client.send(request).timeout(requestTimeout!);
 
     return Response.fromStream(stream).then((response) {
       var responseData = ResponseData.fromHttpResponse(response);
@@ -178,6 +211,6 @@ class HttpClientWithMiddleware extends http.BaseClient {
 
   @override
   void close() {
-    _client.close();
+    client.close();
   }
 }
